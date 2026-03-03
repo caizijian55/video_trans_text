@@ -10,12 +10,6 @@ from io import BytesIO
 import time
 import random
 
-# ========== FastAPI AI 调用接口（给 Dify 用，可选）==========
-from fastapi import FastAPI
-import uvicorn
-from threading import Thread
-from pydantic import BaseModel
-
 # --- 核心配置区（直接写死在代码里，按你的需求保留） ---
 SILICONFLOW_API_KEY = "sk-pyoeczevtyvjxolwtiwslujkncsmwdihvbrowwbatzjzekge"
 PARSING_API_URL = "https://api.bugpk.com/api/douyin"
@@ -139,49 +133,12 @@ def transcribe_audio(client, file_path):
     except Exception as e:
         return f"转录失败: {str(e)}"
 
-# ---------- FastAPI 定义（依赖上面的工具函数和配置） ----------
-
-app = FastAPI(title="视频转文字工具 API")
-
-class VideoRequest(BaseModel):
-    url: str
-
-@app.post("/api/analyze_video")
-def api_analyze_video(request: VideoRequest):
-    """给 Dify AI 调用的接口：传入链接 → 返回转文字结果"""
-    try:
-        audio_path, err = download_video_via_api(request.url, PARSING_API_URL)
-        if not audio_path or not os.path.exists(audio_path):
-            return {"status": "error", "message": err}
-
-        client = OpenAI(api_key=SILICONFLOW_API_KEY, base_url=SILICONFLOW_BASE_URL)
-        text = transcribe_audio(client, audio_path)
-
-        try:
-            os.remove(audio_path)
-            os.rmdir(os.path.dirname(audio_path))
-        except Exception:
-            pass
-
-        return {
-            "status": "success",
-            "url": request.url,
-            "transcript": text,
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-
-def run_api():
-    """启动 FastAPI 服务"""
-    uvicorn.run(app, host="0.0.0.0", port=8002)
-
 # --- UI 侧边栏 ---
 uploaded_file = st.sidebar.file_uploader("Excel/CSV 批量上传", type=["xlsx", "xls", "csv"])
 input_text = st.sidebar.text_area("或输入链接 (一行一个)", height=100)
 
 # --- UI 主界面 ---
-st.title("批量视频转文字工具（已支持 AI 调用）")
+st.title("批量视频转文字工具")
 
 if st.button("开始处理", type="primary"):
     valid_urls = []
@@ -249,8 +206,3 @@ if st.button("开始处理", type="primary"):
             df.to_excel(writer, index=False)
         st.download_button("导出 Excel", buffer.getvalue(), "transcripts.xlsx")
         st.dataframe(df, hide_index=True)
-
-# ========== 启动 FastAPI（在 Streamlit 模式下后台跑） ==========
-if "STREAMLIT_SERVER_PORT" in os.environ:
-    # 使用 streamlit run app.py 时会自动设置这个环境变量
-    Thread(target=run_api, daemon=True).start()

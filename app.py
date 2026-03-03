@@ -13,8 +13,10 @@ import random
 # --- 核心配置区 (安全读取) ---
 try:
     # 尝试读取
-    SILICONFLOW_API_KEY = st.secrets["SILICONFLOW_API_KEY"]
-    PARSING_API_URL = st.secrets["PARSING_API_URL"]
+    # SILICONFLOW_API_KEY = st.secrets["SILICONFLOW_API_KEY"]
+    # PARSING_API_URL = st.secrets["PARSING_API_URL"]
+    SILICONFLOW_API_KEY = "sk-pyoeczevtyvjxolwtiwslujkncsmwdihvbrowwbatzjzekge"
+    PARSING_API_URL = "https://api.bugpk.com/api/douyin"
 
 except Exception as e:
     st.error(f"❌ 启动失败: {e}")

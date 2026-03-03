@@ -10,19 +10,15 @@ from io import BytesIO
 import time
 import random
 
-# --- 核心配置区 (安全读取) ---
-try:
-    # 尝试读取
-    # SILICONFLOW_API_KEY = st.secrets["SILICONFLOW_API_KEY"]
-    # PARSING_API_URL = st.secrets["PARSING_API_URL"]
-    SILICONFLOW_API_KEY = "sk-pyoeczevtyvjxolwtiwslujkncsmwdihvbrowwbatzjzekge"
-    PARSING_API_URL = "https://api.bugpk.com/api/douyin"
+# ========== FastAPI AI 调用接口（给 Dify 用，可选）==========
+from fastapi import FastAPI
+import uvicorn
+from threading import Thread
+from pydantic import BaseModel
 
-except Exception as e:
-    st.error(f"❌ 启动失败: {e}")
-    st.error("请检查 .streamlit/secrets.toml (本地) 或 Streamlit Cloud Secrets (云端)。")
-    st.stop()
-# ---------------------------------------
+# --- 核心配置区（直接写死在代码里，按你的需求保留） ---
+SILICONFLOW_API_KEY = "sk-pyoeczevtyvjxolwtiwslujkncsmwdihvbrowwbatzjzekge"
+PARSING_API_URL = "https://api.bugpk.com/api/douyin"
 
 st.set_page_config(page_title="批量视频转文字工具", layout="wide")
 
@@ -52,11 +48,8 @@ def extract_url(text):
     return match.group(1) if match else None
 
 def download_video_via_api(douyin_url, parser_api_url, status_callback=None):
-    # 重试参数
     MAX_RETRIES_PARSE = 3
     MAX_RETRIES_DOWNLOAD = 3
-    
-    # 1. 解析阶段重试
     video_url = None
     parse_error = None
     
@@ -67,9 +60,6 @@ def download_video_via_api(douyin_url, parser_api_url, status_callback=None):
         
     for i in range(MAX_RETRIES_PARSE):
         try:
-            if i > 0 and status_callback:
-                status_callback(f":gray[连接不稳定，正在重试... ({i+1}/{MAX_RETRIES_PARSE})]")
-            
             headers_parse = get_random_header()
             response = requests.get(api_full_url, headers=headers_parse, timeout=15)
             response.raise_for_status()
@@ -84,19 +74,18 @@ def download_video_via_api(douyin_url, parser_api_url, status_callback=None):
                     video_url = data["video_url"]
             
             if video_url:
-                break # 成功拿到 URL
+                break
             else:
                 parse_error = f"未找到视频 URL. 返回: {str(data)[:200]}"
-                time.sleep(3) # 解析失败等待
+                time.sleep(2)
                 
         except Exception as e:
             parse_error = str(e)
-            time.sleep(3) # 异常等待
+            time.sleep(2)
             
     if not video_url:
-        return None, f"解析彻底失败: {parse_error}"
+        return None, f"解析失败: {parse_error}"
 
-    # 2. 下载阶段重试
     temp_dir = tempfile.mkdtemp()
     mp4_path = os.path.join(temp_dir, "video.mp4")
     download_success = False
@@ -104,9 +93,6 @@ def download_video_via_api(douyin_url, parser_api_url, status_callback=None):
     
     for i in range(MAX_RETRIES_DOWNLOAD):
         try:
-            if i > 0 and status_callback:
-                status_callback(f":gray[连接不稳定，正在重试... ({i+1}/{MAX_RETRIES_DOWNLOAD})]")
-                
             headers_download = get_random_header()
             video_resp = requests.get(video_url, headers=headers_download, stream=True, timeout=30)
             video_resp.raise_for_status()
@@ -119,12 +105,11 @@ def download_video_via_api(douyin_url, parser_api_url, status_callback=None):
             break
         except Exception as e:
             download_error = str(e)
-            time.sleep(5) # 下载失败等待
+            time.sleep(3)
             
     if not download_success:
-        return None, f"下载彻底失败: {download_error}"
+        return None, f"下载失败: {download_error}"
 
-    # 3. 转码音频
     try:
         mp3_path = os.path.join(temp_dir, "audio.mp3")
         command = [
@@ -136,7 +121,7 @@ def download_video_via_api(douyin_url, parser_api_url, status_callback=None):
             mp3_path
         ]
         subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        os.remove(mp4_path) # 立即删除 mp4
+        os.remove(mp4_path)
         return mp3_path, "ok"
     except Exception as e:
         if os.path.exists(mp4_path):
@@ -154,12 +139,49 @@ def transcribe_audio(client, file_path):
     except Exception as e:
         return f"转录失败: {str(e)}"
 
-# --- UI 侧边栏（仅保留输入区域） ---
+# ---------- FastAPI 定义（依赖上面的工具函数和配置） ----------
+
+app = FastAPI(title="视频转文字工具 API")
+
+class VideoRequest(BaseModel):
+    url: str
+
+@app.post("/api/analyze_video")
+def api_analyze_video(request: VideoRequest):
+    """给 Dify AI 调用的接口：传入链接 → 返回转文字结果"""
+    try:
+        audio_path, err = download_video_via_api(request.url, PARSING_API_URL)
+        if not audio_path or not os.path.exists(audio_path):
+            return {"status": "error", "message": err}
+
+        client = OpenAI(api_key=SILICONFLOW_API_KEY, base_url=SILICONFLOW_BASE_URL)
+        text = transcribe_audio(client, audio_path)
+
+        try:
+            os.remove(audio_path)
+            os.rmdir(os.path.dirname(audio_path))
+        except Exception:
+            pass
+
+        return {
+            "status": "success",
+            "url": request.url,
+            "transcript": text,
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+def run_api():
+    """启动 FastAPI 服务"""
+    uvicorn.run(app, host="0.0.0.0", port=8002)
+
+# --- UI 侧边栏 ---
 uploaded_file = st.sidebar.file_uploader("Excel/CSV 批量上传", type=["xlsx", "xls", "csv"])
 input_text = st.sidebar.text_area("或输入链接 (一行一个)", height=100)
 
 # --- UI 主界面 ---
-st.title("批量视频转文字工具")
+st.title("批量视频转文字工具（已支持 AI 调用）")
 
 if st.button("开始处理", type="primary"):
     valid_urls = []
@@ -186,8 +208,6 @@ if st.button("开始处理", type="primary"):
     
     if not valid_urls:
         st.warning("请先输入视频链接或上传文件")
-    elif not SILICONFLOW_API_KEY:
-        st.error("配置错误：API Key 为空，请检查 .streamlit/secrets.toml")
     else:
         client = OpenAI(api_key=SILICONFLOW_API_KEY, base_url=SILICONFLOW_BASE_URL)
         results = []
@@ -196,22 +216,19 @@ if st.button("开始处理", type="primary"):
         total = len(valid_urls)
         
         for i, url in enumerate(valid_urls):
-            current_progress_text = f"正在处理: {url} (进度 {i+1}/{total})"
-            status_text.text(current_progress_text)
+            status_text.text(f"正在处理: {url} ({i+1}/{total})")
             
-            # 定义回调函数更新 UI 状态
             def update_status(msg):
-                status_text.markdown(msg) # 使用 markdown 支持颜色
+                status_text.markdown(msg)
                 
             audio_path, err = download_video_via_api(url, PARSING_API_URL, status_callback=update_status)
             
             if audio_path and os.path.exists(audio_path):
-                # 状态保持显示正在处理，不刷屏
                 transcript = transcribe_audio(client, audio_path)
                 results.append({
                     "原始链接": url,
                     "状态": "成功" if not transcript.startswith("转录失败") else "失败",
-                    "视频逐字稿": transcript if not transcript.startswith("转录失败") else ""
+                    "视频逐字稿": transcript
                 })
                 try:
                     os.remove(audio_path)
@@ -219,36 +236,21 @@ if st.button("开始处理", type="primary"):
                 except:
                     pass
             else:
-                st.error(f"失败: {url}")
-                results.append({
-                    "原始链接": url,
-                    "状态": "失败",
-                    "视频逐字稿": ""
-                })
+                results.append({"原始链接": url, "状态": "失败", "视频逐字稿": ""})
             
             progress_bar.progress((i + 1) / total)
-            
-            # 防风控：随机延时 (静默处理，不显示倒计时干扰用户)
             if i < total - 1:
-                sleep_time = random.uniform(2, 5)
-                time.sleep(sleep_time)
+                time.sleep(random.uniform(1.5, 3))
 
-        status_text.text("处理完成")
-        
-        if results:
-            df = pd.DataFrame(results)
-            
-            # 导出按钮置于表格上方
-            buffer = BytesIO()
-            with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False, sheet_name="transcripts")
-                
-            st.download_button(
-                label="导出结果 (Excel)",
-                data=buffer.getvalue(),
-                file_name="transcripts.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary"
-            )
-            
-            st.dataframe(df, hide_index=True)
+        status_text.text("✅ 处理完成")
+        df = pd.DataFrame(results)
+        buffer = BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False)
+        st.download_button("导出 Excel", buffer.getvalue(), "transcripts.xlsx")
+        st.dataframe(df, hide_index=True)
+
+# ========== 启动 FastAPI（在 Streamlit 模式下后台跑） ==========
+if "STREAMLIT_SERVER_PORT" in os.environ:
+    # 使用 streamlit run app.py 时会自动设置这个环境变量
+    Thread(target=run_api, daemon=True).start()
